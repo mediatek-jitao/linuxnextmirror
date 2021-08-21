@@ -4804,10 +4804,11 @@ out_free:
 static int io_accept_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
 	struct io_accept *accept = &req->accept;
+	unsigned index;
 
 	if (unlikely(req->ctx->flags & IORING_SETUP_IOPOLL))
 		return -EINVAL;
-	if (sqe->ioprio || sqe->len || sqe->buf_index || sqe->splice_fd_in)
+	if (sqe->ioprio || sqe->len || sqe->buf_index)
 		return -EINVAL;
 
 	accept->addr = u64_to_user_ptr(READ_ONCE(sqe->addr));
@@ -4815,6 +4816,17 @@ static int io_accept_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	accept->flags = READ_ONCE(sqe->accept_flags);
 	accept->nofile = rlimit(RLIMIT_NOFILE);
 
+	index = READ_ONCE(sqe->file_index);
+	req->buf_index = index;
+	if (index) {
+		if (req->open.how.flags & O_CLOEXEC)
+			return -EINVAL;
+		if (req->buf_index != index)
+			return -EINVAL;
+	}
+
+	if (req->buf_index && (accept->flags & SOCK_CLOEXEC))
+		return -EINVAL;
 	if (accept->flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
 		return -EINVAL;
 	if (SOCK_NONBLOCK != O_NONBLOCK && (accept->flags & SOCK_NONBLOCK))
@@ -4827,28 +4839,34 @@ static int io_accept(struct io_kiocb *req, unsigned int issue_flags)
 	struct io_accept *accept = &req->accept;
 	bool force_nonblock = issue_flags & IO_URING_F_NONBLOCK;
 	unsigned int file_flags = force_nonblock ? O_NONBLOCK : 0;
+	bool fixed = !!req->buf_index;
 	struct file *file;
 	int ret, fd;
 
 	if (req->file->f_flags & O_NONBLOCK)
 		req->flags |= REQ_F_NOWAIT;
 
-	fd = __get_unused_fd_flags(accept->flags, accept->nofile);
-	if (unlikely(fd < 0))
-		return fd;
-
+	if (!fixed) {
+		fd = __get_unused_fd_flags(accept->flags, accept->nofile);
+		if (unlikely(fd < 0))
+			return fd;
+	}
 	file = do_accept(req->file, file_flags, accept->addr, accept->addr_len,
 			 accept->flags);
 	if (IS_ERR(file)) {
+		if (!fixed)
+			put_unused_fd(fd);
 		ret = PTR_ERR(file);
 		if (ret == -EAGAIN && force_nonblock)
 			return -EAGAIN;
 		if (ret == -ERESTARTSYS)
 			ret = -EINTR;
 		req_set_fail(req);
-	} else {
+	} else if (!fixed) {
 		fd_install(fd, file);
 		ret = fd;
+	} else {
+		ret = io_install_fixed_file(req, file, issue_flags);
 	}
 	__io_req_complete(req, issue_flags, ret, 0);
 	return 0;
