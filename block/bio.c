@@ -282,8 +282,9 @@ void bio_init(struct bio *bio, struct bio_vec *table,
 	atomic_set(&bio->__bi_remaining, 1);
 	atomic_set(&bio->__bi_cnt, 1);
 
-	bio->bi_io_vec = table;
 	bio->bi_max_vecs = max_vecs;
+	bio->bi_io_vec = table;
+	bio->bi_pool = NULL;
 }
 EXPORT_SYMBOL(bio_init);
 
@@ -1700,6 +1701,7 @@ struct bio *bio_alloc_kiocb(struct kiocb *kiocb, unsigned short nr_vecs,
 		cache->nr--;
 		put_cpu();
 		bio_init(bio, nr_vecs ? bio->bi_inline_vecs : NULL, nr_vecs);
+		bio->bi_pool = bs;
 		bio_set_flag(bio, BIO_PERCPU_CACHE);
 		return bio;
 	}
