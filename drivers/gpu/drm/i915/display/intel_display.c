@@ -92,6 +92,7 @@
 #include "intel_hdcp.h"
 #include "intel_hotplug.h"
 #include "intel_overlay.h"
+#include "intel_panel.h"
 #include "intel_pipe_crc.h"
 #include "intel_pm.h"
 #include "intel_pps.h"
@@ -2224,6 +2225,9 @@ static bool underrun_recovery_supported(const struct intel_crtc_state *crtc_stat
 		return false;
 
 	if (crtc_state->has_psr2)
+		return false;
+
+	if (crtc_state->splitter.enable)
 		return false;
 
 	return true;
@@ -10401,10 +10405,7 @@ static void intel_update_crtc(struct intel_atomic_state *state,
 			intel_encoders_update_pipe(state, crtc);
 	}
 
-	if (new_crtc_state->update_pipe && !new_crtc_state->enable_fbc)
-		intel_fbc_disable(crtc);
-	else
-		intel_fbc_enable(state, crtc);
+	intel_fbc_update(state, crtc);
 
 	/* Perform vblank evasion around commit operation */
 	intel_pipe_update_start(new_crtc_state);
