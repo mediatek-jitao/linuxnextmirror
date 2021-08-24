@@ -2837,7 +2837,7 @@ static const struct net_device_ops cxgb4vf_netdev_ops	= {
 	.ndo_set_rx_mode	= cxgb4vf_set_rxmode,
 	.ndo_set_mac_address	= cxgb4vf_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_do_ioctl		= cxgb4vf_do_ioctl,
+	.ndo_eth_ioctl		= cxgb4vf_do_ioctl,
 	.ndo_change_mtu		= cxgb4vf_change_mtu,
 	.ndo_fix_features	= cxgb4vf_fix_features,
 	.ndo_set_features	= cxgb4vf_set_features,
@@ -2917,17 +2917,11 @@ static int cxgb4vf_pci_probe(struct pci_dev *pdev,
 	 * Set up our DMA mask: try for 64-bit address masking first and
 	 * fall back to 32-bit if we can't get 64 bits ...
 	 */
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (err == 0) {
-		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
-		if (err) {
-			dev_err(&pdev->dev, "unable to obtain 64-bit DMA for"
-				" coherent allocations\n");
-			goto err_release_regions;
-		}
 		pci_using_dac = 1;
 	} else {
-		err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 		if (err != 0) {
 			dev_err(&pdev->dev, "no usable DMA configuration\n");
 			goto err_release_regions;
