@@ -1021,6 +1021,7 @@ static const struct io_op_def io_op_defs[] = {
 	},
 	[IORING_OP_WRITE] = {
 		.needs_file		= 1,
+		.hash_reg_file		= 1,
 		.unbound_nonreg_file	= 1,
 		.pollout		= 1,
 		.plug			= 1,
@@ -1849,6 +1850,17 @@ static void io_req_complete_failed(struct io_kiocb *req, long res)
 {
 	req_set_fail(req);
 	io_req_complete_post(req, res, 0);
+}
+
+static void io_req_complete_fail_submit(struct io_kiocb *req)
+{
+	/*
+	 * We don't submit, fail them all, for that replace hardlinks with
+	 * normal links. Extra REQ_F_LINK is tolerated.
+	 */
+	req->flags &= ~REQ_F_HARDLINK;
+	req->flags |= REQ_F_LINK;
+	io_req_complete_failed(req, req->result);
 }
 
 /*
@@ -3410,6 +3422,12 @@ static inline int io_iter_do_read(struct io_kiocb *req, struct iov_iter *iter)
 		return -EINVAL;
 }
 
+static bool need_read_all(struct io_kiocb *req)
+{
+	return req->flags & REQ_F_ISREG ||
+		S_ISBLK(file_inode(req->file)->i_mode);
+}
+
 static int io_read(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct iovec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
@@ -3464,7 +3482,7 @@ static int io_read(struct io_kiocb *req, unsigned int issue_flags)
 	} else if (ret == -EIOCBQUEUED) {
 		goto out_free;
 	} else if (ret <= 0 || ret == io_size || !force_nonblock ||
-		   (req->flags & REQ_F_NOWAIT) || !(req->flags & REQ_F_ISREG)) {
+		   (req->flags & REQ_F_NOWAIT) || !need_read_all(req)) {
 		/* read all, failed, already did sync or don't want to retry */
 		goto done;
 	}
@@ -6398,6 +6416,11 @@ static bool io_drain_req(struct io_kiocb *req)
 	int ret;
 	u32 seq;
 
+	if (req->flags & REQ_F_FAIL) {
+		io_req_complete_fail_submit(req);
+		return true;
+	}
+
 	/*
 	 * If we need to drain a request in the middle of a link, drain the
 	 * head request and the next request/link after the current link.
@@ -6914,7 +6937,7 @@ static inline void io_queue_sqe(struct io_kiocb *req)
 	if (likely(!(req->flags & (REQ_F_FORCE_ASYNC | REQ_F_FAIL)))) {
 		__io_queue_sqe(req);
 	} else if (req->flags & REQ_F_FAIL) {
-		io_req_complete_failed(req, req->result);
+		io_req_complete_fail_submit(req);
 	} else {
 		int ret = io_req_prep_async(req);
 
