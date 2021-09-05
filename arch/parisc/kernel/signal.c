@@ -230,25 +230,31 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 	struct rt_sigframe __user *frame;
 	unsigned long rp, usp;
 	unsigned long haddr, sigframe_size;
-	unsigned long start, end;
+	unsigned long start, end, max;
 	int err = 0;
 #ifdef CONFIG_64BIT
 	struct compat_rt_sigframe __user * compat_frame;
 #endif
 	
 	usp = (regs->gr[30] & ~(0x01UL));
+	sigframe_size = PARISC_RT_SIGFRAME_SIZE;
 #ifdef CONFIG_64BIT
 	if (is_compat_task()) {
 		/* The gcc alloca implementation leaves garbage in the upper 32 bits of sp */
 		usp = (compat_uint_t)usp;
+		sigframe_size = PARISC_RT_SIGFRAME_SIZE32;
 	}
 #endif
-	/*FIXME: frame_size parameter is unused, remove it. */
-	frame = get_sigframe(&ksig->ka, usp, sizeof(*frame));
+	frame = get_sigframe(&ksig->ka, usp, sigframe_size);
 
 	DBG(1,"SETUP_RT_FRAME: START\n");
 	DBG(1,"setup_rt_frame: frame %p info %p\n", frame, ksig->info);
 
+	start = (unsigned long) frame;
+	end = start + sigframe_size;
+	max = user_addr_max();
+	if (start >= max || end >= max)
+		return -EFAULT;
 	
 #ifdef CONFIG_64BIT
 
@@ -353,11 +359,6 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 
 	/* The syscall return path will create IAOQ values from r31.
 	 */
-	sigframe_size = PARISC_RT_SIGFRAME_SIZE;
-#ifdef CONFIG_64BIT
-	if (is_compat_task())
-		sigframe_size = PARISC_RT_SIGFRAME_SIZE32;
-#endif
 	if (in_syscall) {
 		regs->gr[31] = haddr;
 #ifdef CONFIG_64BIT
