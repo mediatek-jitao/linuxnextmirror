@@ -24,6 +24,22 @@
 /* The maximum number of sg elements that fit into a virtqueue */
 #define VIRTIO_BLK_MAX_SG_ELEMS 32768
 
+static int virtblk_queue_count_set(const char *val,
+		const struct kernel_param *kp)
+{
+	return param_set_uint_minmax(val, kp, 1, nr_cpu_ids);
+}
+
+static const struct kernel_param_ops queue_count_ops = {
+	.set = virtblk_queue_count_set,
+	.get = param_get_uint,
+};
+
+static unsigned int num_io_request_queues;
+module_param_cb(num_io_request_queues, &queue_count_ops, &num_io_request_queues, 0644);
+MODULE_PARM_DESC(num_io_request_queues,
+		 "Limit number of IO request virt queues to use for each device. 0 for now limit");
+
 static int major;
 static DEFINE_IDA(vd_index_ida);
 
@@ -498,7 +514,9 @@ static int init_vq(struct virtio_blk *vblk)
 	if (err)
 		num_vqs = 1;
 
-	num_vqs = min_t(unsigned int, nr_cpu_ids, num_vqs);
+	num_vqs = min_t(unsigned int,
+			min_not_zero(num_io_request_queues, nr_cpu_ids),
+			num_vqs);
 
 	vblk->vqs = kmalloc_array(num_vqs, sizeof(*vblk->vqs), GFP_KERNEL);
 	if (!vblk->vqs)
@@ -762,7 +780,7 @@ static int virtblk_probe(struct virtio_device *vdev)
 		goto out_free_vblk;
 
 	/* Default queue sizing is to fill the ring. */
-	if (likely(!virtblk_queue_depth)) {
+	if (!virtblk_queue_depth) {
 		queue_depth = vblk->vqs[0].vq->num_free;
 		/* ... but without indirect descs, we use 2 descs per req */
 		if (!virtio_has_feature(vdev, VIRTIO_RING_F_INDIRECT_DESC))
@@ -836,7 +854,7 @@ static int virtblk_probe(struct virtio_device *vdev)
 	else
 		blk_size = queue_logical_block_size(q);
 
-	if (unlikely(blk_size < SECTOR_SIZE || blk_size > PAGE_SIZE)) {
+	if (blk_size < SECTOR_SIZE || blk_size > PAGE_SIZE) {
 		dev_err(&vdev->dev,
 			"block size is changed unexpectedly, now is %u\n",
 			blk_size);
