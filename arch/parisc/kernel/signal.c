@@ -299,16 +299,6 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 			&frame->tramp[SIGRESTARTBLOCK_TRAMP+2]);
 	err |= __put_user(INSN_NOP, &frame->tramp[SIGRESTARTBLOCK_TRAMP+3]);
 
-#if DEBUG_SIG
-	/* Assert that we're flushing in the correct space... */
-	{
-		unsigned long sid;
-		asm ("mfsp %%sr3,%0" : "=r" (sid));
-		DBG(1,"setup_rt_frame: Flushing 64 bytes at space %#x offset %p\n",
-		       sid, frame->tramp);
-	}
-#endif
-
 	start = (unsigned long) &frame->tramp[0];
 	end = (unsigned long) &frame->tramp[TRAMP_SIZE];
 	flush_user_dcache_range_asm(start, end);
