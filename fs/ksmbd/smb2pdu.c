@@ -2661,11 +2661,17 @@ int smb2_open(struct ksmbd_work *work)
 	}
 
 	if (req->CreateOptions & FILE_DELETE_ON_CLOSE_LE) {
-		/*
-		 * On delete request, instead of following up, need to
-		 * look the current entity
-		 */
-		rc = ksmbd_vfs_kern_path(name, 0, &path, 1);
+		if (test_share_config_flag(work->tcon->share_conf,
+					   KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS)) {
+			/*
+			 * On delete request, instead of following up, need to
+			 * look the current entity
+			 */
+			rc = ksmbd_vfs_kern_path(name, 0, &path, 1);
+		} else {
+			rc = ksmbd_vfs_kern_path(name, LOOKUP_NO_SYMLINKS, &path, 1);
+		}
+
 		if (!rc) {
 			/*
 			 * If file exists with under flags, return access
@@ -2698,7 +2704,8 @@ int smb2_open(struct ksmbd_work *work)
 				rc = ksmbd_vfs_kern_path(name, 0, &path, 1);
 			}
 		} else {
-			rc = ksmbd_vfs_kern_path(name, 0, &path, 1);
+			rc = ksmbd_vfs_kern_path(name, LOOKUP_NO_SYMLINKS,
+						 &path, 1);
 			if (!rc && d_is_symlink(path.dentry)) {
 				rc = -EACCES;
 				path_put(&path);
@@ -4790,7 +4797,7 @@ static int smb2_get_info_filesystem(struct ksmbd_work *work,
 	struct path path;
 	int rc = 0, len;
 	int fs_infoclass_size = 0;
-	int lookup_flags = 0;
+	int lookup_flags = LOOKUP_NO_SYMLINKS;
 
 	if (test_share_config_flag(share, KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
 		lookup_flags = LOOKUP_FOLLOW;
@@ -5302,7 +5309,7 @@ static int smb2_rename(struct ksmbd_work *work,
 	char *pathname = NULL;
 	struct path path;
 	bool file_present = true;
-	int rc;
+	int rc, lookup_flags = LOOKUP_NO_SYMLINKS;
 
 	ksmbd_debug(SMB, "setting FILE_RENAME_INFO\n");
 	pathname = kmalloc(PATH_MAX, GFP_KERNEL);
@@ -5371,8 +5378,11 @@ static int smb2_rename(struct ksmbd_work *work,
 		goto out;
 	}
 
+	if (test_share_config_flag(share, KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
+		lookup_flags = LOOKUP_FOLLOW;
+
 	ksmbd_debug(SMB, "new name %s\n", new_name);
-	rc = ksmbd_vfs_kern_path(new_name, 0, &path, 1);
+	rc = ksmbd_vfs_kern_path(new_name, lookup_flags, &path, 1);
 	if (rc)
 		file_present = false;
 	else
@@ -5422,7 +5432,7 @@ static int smb2_create_link(struct ksmbd_work *work,
 	char *link_name = NULL, *target_name = NULL, *pathname = NULL;
 	struct path path;
 	bool file_present = true;
-	int rc;
+	int rc, lookup_flags = LOOKUP_NO_SYMLINKS;
 
 	if (buf_len < sizeof(struct smb2_file_link_info) +
 			le32_to_cpu(file_info->FileNameLength))
@@ -5449,8 +5459,11 @@ static int smb2_create_link(struct ksmbd_work *work,
 		goto out;
 	}
 
+	if (test_share_config_flag(share, KSMBD_SHARE_FLAG_FOLLOW_SYMLINKS))
+		lookup_flags = LOOKUP_FOLLOW;
+
 	ksmbd_debug(SMB, "target name is %s\n", target_name);
-	rc = ksmbd_vfs_kern_path(link_name, 0, &path, 0);
+	rc = ksmbd_vfs_kern_path(link_name, lookup_flags, &path, 0);
 	if (rc)
 		file_present = false;
 	else
