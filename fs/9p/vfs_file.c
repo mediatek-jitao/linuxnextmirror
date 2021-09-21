@@ -554,7 +554,7 @@ v9fs_vm_page_mkwrite(struct vm_fault *vmf)
 #endif
 
 	if (PageWriteback(page) &&
-	    wait_on_page_bit_killable(page, PG_writeback) < 0)
+	    folio_wait_bit_killable(page_folio(page), PG_writeback) < 0)
 		return VM_FAULT_RETRY;
 
 	/* Update file times before taking page lock */
