@@ -1347,6 +1347,19 @@ retry_init:
 		goto err_pci;
 	}
 
+	/*
+	 * 1. don't init fbdev on hw without DCE
+	 * 2. don't init fbdev if there are no connectors
+	 */
+	if (adev->mode_info.mode_config_initialized &&
+	    !list_empty(&adev_to_drm(adev)->mode_config.connector_list)) {
+		/* select 8 bpp console on low vram cards */
+		if (adev->gmc.real_vram_size <= (32*1024*1024))
+			drm_fbdev_generic_setup(adev_to_drm(adev), 8);
+		else
+			drm_fbdev_generic_setup(adev_to_drm(adev), 32);
+	}
+
 	ret = amdgpu_debugfs_init(adev);
 	if (ret)
 		DRM_ERROR("Creating debugfs files failed (%d).\n", ret);
@@ -1507,6 +1520,10 @@ static int amdgpu_pmops_resume(struct device *dev)
 	struct drm_device *drm_dev = dev_get_drvdata(dev);
 	struct amdgpu_device *adev = drm_to_adev(drm_dev);
 	int r;
+
+	/* Avoids registers access if device is physically gone */
+	if (!pci_device_is_present(adev->pdev))
+		adev->no_hw_access = true;
 
 	r = amdgpu_device_resume(drm_dev, true);
 	if (amdgpu_acpi_is_s0ix_active(adev))
