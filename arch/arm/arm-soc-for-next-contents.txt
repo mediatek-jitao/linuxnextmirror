@@ -11,6 +11,25 @@ arm/dt
 		git://git.kernel.org/pub/scm/linux/kernel/git/geert/renesas-devel tags/renesas-arm-dt-for-v5.16-tag1
 	renesas/dt-bindings
 		git://git.kernel.org/pub/scm/linux/kernel/git/geert/renesas-devel tags/renesas-dt-bindings-for-v5.16-tag1
+	zynq/dt64
+		https://github.com/Xilinx/linux-xlnx tags/zynqmp-dt-for-v5.16-v2
+	amlogic/dt
+		git://git.kernel.org/pub/scm/linux/kernel/git/amlogic/linux tags/amlogic-arm64-dt-for-v5.16
+	patch
+		dt-bindings: arm: Add bindings for Unisoc's UMS512
+		arm64: dts: Add support for Unisoc's UMS512
+	tegra/dt-bindings
+		git://git.kernel.org/pub/scm/linux/kernel/git/tegra/linux tags/tegra-for-5.16-dt-bindings
+	tegra/dt
+		git://git.kernel.org/pub/scm/linux/kernel/git/tegra/linux tags/tegra-for-5.16-arm64-dt
+	mediatek/dts32
+		git://git.kernel.org/pub/scm/linux/kernel/git/matthias.bgg/linux tags/v5.15-next-dts32
+	omap/dt
+		git://git.kernel.org/pub/scm/linux/kernel/git/tmlind/linux-omap tags/omap-for-v5.16/dt-signed
+	at91/dt
+		git://git.kernel.org/pub/scm/linux/kernel/git/at91/linux tags/at91-dt-5.16
+	patch
+		Revert "arm64: dts: Add support for Unisoc's UMS512"
 
 arm/drivers
 	renesas/drivers
@@ -31,6 +50,8 @@ arm/drivers
 		git://git.kernel.org/pub/scm/linux/kernel/git/krzk/linux-mem-ctrl tags/memory-controller-drv-5.16
 	mediatek/soc
 		git://git.kernel.org/pub/scm/linux/kernel/git/matthias.bgg/linux tags/v5.15-next-soc
+	omap/ti-sysc
+		git://git.kernel.org/pub/scm/linux/kernel/git/tmlind/linux-omap tags/omap-for-v5.16/ti-sysc-signed
 
 arm/defconfigs
 	defconfig/multiv7
