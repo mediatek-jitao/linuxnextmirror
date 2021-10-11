@@ -162,7 +162,7 @@
 		chipid@e0020000 {
 			compatible = "microchip,sama7g5-chipid";
 			reg = <0xe0020000 0x8>;
-		}
+		};
 
 		adc: adc@e1000000 {
 			compatible = "microchip,sama7g5-adc";
