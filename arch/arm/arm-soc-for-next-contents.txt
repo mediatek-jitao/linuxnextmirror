@@ -1,4 +1,8 @@
 arm/soc
+	omap/soc
+		git://git.kernel.org/pub/scm/linux/kernel/git/tmlind/linux-omap tags/omap-for-v5.16/soc-signed
+	at91/soc
+		git://git.kernel.org/pub/scm/linux/kernel/git/at91/linux tags/at91-soc-5.16
 
 arm/dt
 	zynq/dt
@@ -30,6 +34,8 @@ arm/dt
 		git://git.kernel.org/pub/scm/linux/kernel/git/at91/linux tags/at91-dt-5.16
 	patch
 		Revert "arm64: dts: Add support for Unisoc's UMS512"
+	tegra/dt32
+		git://git.kernel.org/pub/scm/linux/kernel/git/tegra/linux tags/tegra-for-5.16-arm-dt
 
 arm/drivers
 	renesas/drivers
@@ -60,6 +66,8 @@ arm/defconfigs
 		git://git.kernel.org/pub/scm/linux/kernel/git/geert/renesas-devel tags/renesas-arm-defconfig-for-v5.16-tag1
 	patch
 		arm64: defconfig: drop obsolete ARCH_* configs
+	tegra/defconfig
+		git://git.kernel.org/pub/scm/linux/kernel/git/tegra/linux tags/tegra-for-5.16-arm64-defconfig
 
 arm/newsoc
 
