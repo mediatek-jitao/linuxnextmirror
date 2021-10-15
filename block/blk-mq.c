@@ -373,6 +373,38 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	return rq;
 }
 
+static inline struct request *
+__blk_mq_alloc_requests_batch(struct blk_mq_alloc_data *data,
+		u64 alloc_time_ns)
+{
+	unsigned int tag, tag_offset;
+	struct request *rq;
+	unsigned long tags;
+	int i, nr = 0;
+
+	tags = blk_mq_get_tags(data, data->nr_tags, &tag_offset);
+	if (unlikely(!tags))
+		return NULL;
+
+	for (i = 0; tags; i++) {
+		if (!(tags & (1UL << i)))
+			continue;
+		tag = tag_offset + i;
+		tags &= ~(1UL << i);
+		rq = blk_mq_rq_ctx_init(data, tag, alloc_time_ns);
+		rq->rq_next = *data->cached_rq;
+		*data->cached_rq = rq;
+	}
+	data->nr_tags -= nr;
+
+	if (!data->cached_rq)
+		return NULL;
+
+	rq = *data->cached_rq;
+	*data->cached_rq = rq->rq_next;
+	return rq;
+}
+
 static struct request *__blk_mq_alloc_requests(struct blk_mq_alloc_data *data)
 {
 	struct request_queue *q = data->q;
@@ -408,42 +440,35 @@ retry:
 		blk_mq_tag_busy(data->hctx);
 
 	/*
+	 * Try batched alloc if we want more than 1 tag.
+	 */
+	if (data->nr_tags > 1) {
+		rq = __blk_mq_alloc_requests_batch(data, alloc_time_ns);
+		if (rq)
+			return rq;
+		data->nr_tags = 1;
+	}
+
+	/*
 	 * Waiting allocations only fail because of an inactive hctx.  In that
 	 * case just retry the hctx assignment and tag allocation as CPU hotplug
 	 * should have migrated us to an online CPU by now.
 	 */
-	do {
-		tag = blk_mq_get_tag(data);
-		if (tag == BLK_MQ_NO_TAG) {
-			if (data->flags & BLK_MQ_REQ_NOWAIT)
-				break;
-			/*
-			 * Give up the CPU and sleep for a random short time to
-			 * ensure that thread using a realtime scheduling class
-			 * are migrated off the CPU, and thus off the hctx that
-			 * is going away.
-			 */
-			msleep(3);
-			goto retry;
-		}
+	tag = blk_mq_get_tag(data);
+	if (tag == BLK_MQ_NO_TAG) {
+		if (data->flags & BLK_MQ_REQ_NOWAIT)
+			return NULL;
+		/*
+		 * Give up the CPU and sleep for a random short time to
+		 * ensure that thread using a realtime scheduling class
+		 * are migrated off the CPU, and thus off the hctx that
+		 * is going away.
+		 */
+		msleep(3);
+		goto retry;
+	}
 
-		rq = blk_mq_rq_ctx_init(data, tag, alloc_time_ns);
-		if (!--data->nr_tags || e ||
-		    (data->hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED))
-			return rq;
-
-		/* link into the cached list */
-		rq->rq_next = *data->cached_rq;
-		*data->cached_rq = rq;
-		data->flags |= BLK_MQ_REQ_NOWAIT;
-	} while (1);
-
-	if (!data->cached_rq)
-		return NULL;
-
-	rq = *data->cached_rq;
-	*data->cached_rq = rq->rq_next;
-	return rq;
+	return blk_mq_rq_ctx_init(data, tag, alloc_time_ns);
 }
 
 struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
@@ -598,19 +623,17 @@ void blk_mq_free_plug_rqs(struct blk_plug *plug)
 
 inline void __blk_mq_end_request(struct request *rq, blk_status_t error)
 {
-	u64 now = 0;
+	if (blk_mq_need_time_stamp(rq)) {
+		u64 now = ktime_get_ns();
 
-	if (blk_mq_need_time_stamp(rq))
-		now = ktime_get_ns();
+		if (rq->rq_flags & RQF_STATS) {
+			blk_mq_poll_stats_start(rq->q);
+			blk_stat_add(rq, now);
+		}
 
-	if (rq->rq_flags & RQF_STATS) {
-		blk_mq_poll_stats_start(rq->q);
-		blk_stat_add(rq, now);
+		blk_mq_sched_completed_request(rq, now);
+		blk_account_io_done(rq, now);
 	}
-
-	blk_mq_sched_completed_request(rq, now);
-
-	blk_account_io_done(rq, now);
 
 	if (rq->end_io) {
 		rq_qos_done(rq->q, rq);
