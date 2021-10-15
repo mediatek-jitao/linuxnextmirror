@@ -11392,7 +11392,8 @@ static int memslot_rmap_alloc(struct kvm_memory_slot *slot,
 		int level = i + 1;
 		int lpages = __kvm_mmu_slot_lpages(slot, npages, level);
 
-		WARN_ON(slot->arch.rmap[i]);
+		if (slot->arch.rmap[i])
+			continue;
 
 		slot->arch.rmap[i] = vcalloc(lpages, sz);
 		if (!slot->arch.rmap[i]) {
