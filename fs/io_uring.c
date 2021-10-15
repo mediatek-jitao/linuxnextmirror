@@ -317,6 +317,7 @@ struct io_submit_state {
 
 	bool			plug_started;
 	bool			need_plug;
+	unsigned short		submit_nr;
 	struct blk_plug		plug;
 };
 
@@ -2434,14 +2435,15 @@ static inline bool io_run_task_work(void)
 static int io_do_iopoll(struct io_ring_ctx *ctx, bool force_nonspin)
 {
 	struct io_wq_work_node *pos, *start, *prev;
+	unsigned int poll_flags = BLK_POLL_NOSLEEP;
 	int nr_events = 0;
-	bool spin;
 
 	/*
 	 * Only spin for completions if we don't have multiple devices hanging
 	 * off our complete list.
 	 */
-	spin = !ctx->poll_multi_queue && !force_nonspin;
+	if (ctx->poll_multi_queue && force_nonspin)
+		poll_flags |= BLK_POLL_ONESHOT;
 
 	wq_list_for_each(pos, start, &ctx->iopoll_list) {
 		struct io_kiocb *req = container_of(pos, struct io_kiocb, comp_list);
@@ -2456,11 +2458,11 @@ static int io_do_iopoll(struct io_ring_ctx *ctx, bool force_nonspin)
 		if (READ_ONCE(req->iopoll_completed))
 			break;
 
-		ret = kiocb->ki_filp->f_op->iopoll(kiocb, spin);
+		ret = kiocb->ki_filp->f_op->iopoll(kiocb, poll_flags);
 		if (unlikely(ret < 0))
 			return ret;
 		else if (ret)
-			spin = false;
+			poll_flags |= BLK_POLL_ONESHOT;
 
 		/* iopoll may have completed current req */
 		if (READ_ONCE(req->iopoll_completed))
@@ -2726,19 +2728,12 @@ static void io_iopoll_req_issued(struct io_kiocb *req)
 		ctx->poll_multi_queue = false;
 	} else if (!ctx->poll_multi_queue) {
 		struct io_kiocb *list_req;
-		unsigned int queue_num0, queue_num1;
 
 		list_req = container_of(ctx->iopoll_list.first, struct io_kiocb,
 					comp_list);
 
-		if (list_req->file != req->file) {
+		if (list_req->file != req->file)
 			ctx->poll_multi_queue = true;
-		} else {
-			queue_num0 = blk_qc_t_to_queue_num(list_req->rw.kiocb.ki_cookie);
-			queue_num1 = blk_qc_t_to_queue_num(req->rw.kiocb.ki_cookie);
-			if (queue_num0 != queue_num1)
-				ctx->poll_multi_queue = true;
-		}
 	}
 
 	/*
@@ -7080,7 +7075,7 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		if (state->need_plug && io_op_defs[opcode].plug) {
 			state->plug_started = true;
 			state->need_plug = false;
-			blk_start_plug(&state->plug);
+			blk_start_plug_nr_ios(&state->plug, state->submit_nr);
 		}
 
 		req->file = io_file_get(ctx, req, READ_ONCE(sqe->fd),
@@ -7201,6 +7196,7 @@ static void io_submit_state_start(struct io_submit_state *state,
 {
 	state->plug_started = false;
 	state->need_plug = max_ios > 2;
+	state->submit_nr = max_ios;
 	/* set only head, no need to init link_last in advance */
 	state->link.head = NULL;
 }
