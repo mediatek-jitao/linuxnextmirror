@@ -2710,13 +2710,13 @@ static void io_complete_rw_iopoll(struct kiocb *kiocb, long res, long res2)
  * find it from a io_do_iopoll() thread before the issuer is done
  * accessing the kiocb cookie.
  */
-static void io_iopoll_req_issued(struct io_kiocb *req)
+static void io_iopoll_req_issued(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx *ctx = req->ctx;
-	const bool in_async = io_wq_current_is_worker();
+	const bool need_lock = !(issue_flags & IO_URING_F_NONBLOCK);
 
 	/* workqueue context doesn't hold uring_lock, grab it now */
-	if (unlikely(in_async))
+	if (unlikely(need_lock))
 		mutex_lock(&ctx->uring_lock);
 
 	/*
@@ -2745,7 +2745,7 @@ static void io_iopoll_req_issued(struct io_kiocb *req)
 	else
 		wq_list_add_tail(&req->comp_list, &ctx->iopoll_list);
 
-	if (unlikely(in_async)) {
+	if (unlikely(need_lock)) {
 		/*
 		 * If IORING_SETUP_SQPOLL is enabled, sqes are either handle
 		 * in sq thread task context or in io worker task context. If
@@ -2830,8 +2830,8 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 		req->flags |= REQ_F_CUR_POS;
 		kiocb->ki_pos = file->f_pos;
 	}
-	kiocb->ki_hint = ki_hint_validate(file_write_hint(kiocb->ki_filp));
-	kiocb->ki_flags = iocb_flags(kiocb->ki_filp);
+	kiocb->ki_hint = ki_hint_validate(file_write_hint(file));
+	kiocb->ki_flags = iocb_flags(file);
 	ret = kiocb_set_rw_flags(kiocb, READ_ONCE(sqe->rw_flags));
 	if (unlikely(ret))
 		return ret;
@@ -2856,8 +2856,7 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 		kiocb->ki_ioprio = get_current_ioprio();
 
 	if (ctx->flags & IORING_SETUP_IOPOLL) {
-		if (!(kiocb->ki_flags & IOCB_DIRECT) ||
-		    !kiocb->ki_filp->f_op->iopoll)
+		if (!(kiocb->ki_flags & IOCB_DIRECT) || !file->f_op->iopoll)
 			return -EOPNOTSUPP;
 
 		kiocb->ki_flags |= IOCB_HIPRI | IOCB_ALLOC_CACHE;
@@ -2869,12 +2868,7 @@ static int io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 		kiocb->ki_complete = io_complete_rw;
 	}
 
-	if (req->opcode == IORING_OP_READ_FIXED ||
-	    req->opcode == IORING_OP_WRITE_FIXED) {
-		req->imu = NULL;
-		io_req_set_rsrc_node(req, ctx);
-	}
-
+	req->imu = NULL;
 	req->rw.addr = READ_ONCE(sqe->addr);
 	req->rw.len = READ_ONCE(sqe->len);
 	req->buf_index = READ_ONCE(sqe->buf_index);
@@ -3003,13 +2997,15 @@ static int __io_import_fixed(struct io_kiocb *req, int rw, struct iov_iter *iter
 
 static int io_import_fixed(struct io_kiocb *req, int rw, struct iov_iter *iter)
 {
-	struct io_ring_ctx *ctx = req->ctx;
 	struct io_mapped_ubuf *imu = req->imu;
 	u16 index, buf_index = req->buf_index;
 
 	if (likely(!imu)) {
+		struct io_ring_ctx *ctx = req->ctx;
+
 		if (unlikely(buf_index >= ctx->nr_user_bufs))
 			return -EFAULT;
+		io_req_set_rsrc_node(req, ctx);
 		index = array_index_nospec(buf_index, ctx->nr_user_bufs);
 		imu = READ_ONCE(ctx->user_bufs[index]);
 		req->imu = imu;
@@ -3153,62 +3149,66 @@ static ssize_t io_iov_buffer_select(struct io_kiocb *req, struct iovec *iov,
 	return __io_iov_buffer_select(req, iov, issue_flags);
 }
 
-static int __io_import_iovec(int rw, struct io_kiocb *req, struct iovec **iovec,
-			     struct io_rw_state *s, unsigned int issue_flags)
+static struct iovec *__io_import_iovec(int rw, struct io_kiocb *req,
+				       struct io_rw_state *s,
+				       unsigned int issue_flags)
 {
 	struct iov_iter *iter = &s->iter;
-	void __user *buf = u64_to_user_ptr(req->rw.addr);
-	size_t sqe_len = req->rw.len;
 	u8 opcode = req->opcode;
+	struct iovec *iovec;
+	void __user *buf;
+	size_t sqe_len;
 	ssize_t ret;
 
-	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED) {
-		*iovec = NULL;
-		return io_import_fixed(req, rw, iter);
-	}
+	BUILD_BUG_ON(ERR_PTR(0) != NULL);
+
+	if (opcode == IORING_OP_READ_FIXED || opcode == IORING_OP_WRITE_FIXED)
+		return ERR_PTR(io_import_fixed(req, rw, iter));
 
 	/* buffer index only valid with fixed read/write, or buffer select  */
-	if (req->buf_index && !(req->flags & REQ_F_BUFFER_SELECT))
-		return -EINVAL;
+	if (unlikely(req->buf_index && !(req->flags & REQ_F_BUFFER_SELECT)))
+		return ERR_PTR(-EINVAL);
+
+	buf = u64_to_user_ptr(req->rw.addr);
+	sqe_len = req->rw.len;
 
 	if (opcode == IORING_OP_READ || opcode == IORING_OP_WRITE) {
 		if (req->flags & REQ_F_BUFFER_SELECT) {
 			buf = io_rw_buffer_select(req, &sqe_len, issue_flags);
 			if (IS_ERR(buf))
-				return PTR_ERR(buf);
+				return ERR_PTR(PTR_ERR(buf));
 			req->rw.len = sqe_len;
 		}
 
 		ret = import_single_range(rw, buf, sqe_len, s->fast_iov, iter);
-		*iovec = NULL;
-		return ret;
+		return ERR_PTR(ret);
 	}
 
-	*iovec = s->fast_iov;
-
+	iovec = s->fast_iov;
 	if (req->flags & REQ_F_BUFFER_SELECT) {
-		ret = io_iov_buffer_select(req, *iovec, issue_flags);
+		ret = io_iov_buffer_select(req, iovec, issue_flags);
 		if (!ret)
-			iov_iter_init(iter, rw, *iovec, 1, (*iovec)->iov_len);
-		*iovec = NULL;
-		return ret;
+			iov_iter_init(iter, rw, iovec, 1, iovec->iov_len);
+		return ERR_PTR(ret);
 	}
 
-	return __import_iovec(rw, buf, sqe_len, UIO_FASTIOV, iovec, iter,
+	ret = __import_iovec(rw, buf, sqe_len, UIO_FASTIOV, &iovec, iter,
 			      req->ctx->compat);
+	if (unlikely(ret < 0))
+		return ERR_PTR(ret);
+	return iovec;
 }
 
 static inline int io_import_iovec(int rw, struct io_kiocb *req,
 				  struct iovec **iovec, struct io_rw_state *s,
 				  unsigned int issue_flags)
 {
-	int ret;
+	*iovec = __io_import_iovec(rw, req, s, issue_flags);
+	if (unlikely(IS_ERR(*iovec)))
+		return PTR_ERR(*iovec);
 
-	ret = __io_import_iovec(rw, req, iovec, s, issue_flags);
-	if (unlikely(ret < 0))
-		return ret;
 	iov_iter_save_state(&s->iter, &s->iter_state);
-	return ret;
+	return 0;
 }
 
 static inline loff_t *io_kiocb_ppos(struct kiocb *kiocb)
@@ -6586,7 +6586,6 @@ static void io_clean_op(struct io_kiocb *req)
 
 static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 {
-	struct io_ring_ctx *ctx = req->ctx;
 	const struct cred *creds = NULL;
 	int ret;
 
@@ -6713,8 +6712,8 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	if (ret)
 		return ret;
 	/* If the op doesn't have a file, we're not polling for it */
-	if ((ctx->flags & IORING_SETUP_IOPOLL) && req->file)
-		io_iopoll_req_issued(req);
+	if ((req->ctx->flags & IORING_SETUP_IOPOLL) && req->file)
+		io_iopoll_req_issued(req, issue_flags);
 
 	return 0;
 }
