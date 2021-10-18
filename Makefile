@@ -796,6 +796,14 @@ KBUILD_CFLAGS += -Wno-gnu
 # source of a reference will be _MergedGlobals and not on of the whitelisted names.
 # See modpost pattern 2
 KBUILD_CFLAGS += -mno-global-merge
+# Warn about unmarked fall-throughs in switch statement as long as
+# -Wunreachable-code-fallthrough is present. Clang prior to 14
+# warned on unreachable fallthroughs with -Wimplicit-fallthrough,
+# which is unacceptable due to IS_ENABLED().
+# https://bugs.llvm.org/show_bug.cgi?id=51094
+ifneq ($(call cc-option,-Wunreachable-code-fallthrough),)
+KBUILD_CFLAGS += -Wimplicit-fallthrough
+endif
 else
 
 # Warn about unmarked fall-throughs in switch statement.
@@ -953,6 +961,11 @@ KBUILD_CFLAGS += -Wvla
 
 # disable pointer signed / unsigned warnings in gcc 4.0
 KBUILD_CFLAGS += -Wno-pointer-sign
+
+# In order to make sure new function cast mismatches are not introduced
+# in the kernel (to avoid tripping CFI checking), the kernel should be
+# globally built with -Wcast-function-type.
+KBUILD_CFLAGS += -Wcast-function-type
 
 # disable stringop warnings in gcc 8+
 KBUILD_CFLAGS += $(call cc-disable-warning, stringop-truncation)
