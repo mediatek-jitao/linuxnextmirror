@@ -5228,13 +5228,9 @@ struct io_poll_table {
 	int error;
 };
 
-static int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *poll,
+static inline int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *poll,
 			   __poll_t mask, io_req_tw_func_t func)
 {
-	/* for instances that support it check for an event match first: */
-	if (mask && !(mask & poll->events))
-		return 0;
-
 	trace_io_uring_task_add(req->ctx, req->opcode, req->user_data, mask);
 
 	list_del_init(&poll->wait.entry);
@@ -5508,11 +5504,16 @@ static int io_async_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 {
 	struct io_kiocb *req = wait->private;
 	struct io_poll_iocb *poll = &req->apoll->poll;
+	__poll_t mask = key_to_poll(key);
 
 	trace_io_uring_poll_wake(req->ctx, req->opcode, req->user_data,
 					key_to_poll(key));
 
-	return __io_async_wake(req, poll, key_to_poll(key), io_async_task_func);
+	/* for instances that support it check for an event match first: */
+	if (mask && !(mask & poll->events))
+		return 0;
+
+	return __io_async_wake(req, poll, mask, io_async_task_func);
 }
 
 static void io_poll_req_insert(struct io_kiocb *req)
@@ -5770,8 +5771,13 @@ static int io_poll_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 {
 	struct io_kiocb *req = wait->private;
 	struct io_poll_iocb *poll = &req->poll;
+	__poll_t mask = key_to_poll(key);
 
-	return __io_async_wake(req, poll, key_to_poll(key), io_poll_task_func);
+	/* for instances that support it check for an event match first: */
+	if (mask && !(mask & poll->events))
+		return 0;
+
+	return __io_async_wake(req, poll, mask, io_poll_task_func);
 }
 
 static void io_poll_queue_proc(struct file *file, struct wait_queue_head *head,
