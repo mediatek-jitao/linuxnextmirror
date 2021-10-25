@@ -5248,10 +5248,7 @@ static inline int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *pol
 }
 
 static bool io_poll_rewait(struct io_kiocb *req, struct io_poll_iocb *poll)
-	__acquires(&req->ctx->completion_lock)
 {
-	struct io_ring_ctx *ctx = req->ctx;
-
 	/* req->task == current here, checking PF_EXITING is safe */
 	if (unlikely(req->task->flags & PF_EXITING))
 		WRITE_ONCE(poll->canceled, true);
@@ -5262,7 +5259,6 @@ static bool io_poll_rewait(struct io_kiocb *req, struct io_poll_iocb *poll)
 		req->result = vfs_poll(req->file, &pt) & poll->events;
 	}
 
-	spin_lock(&ctx->completion_lock);
 	if (!req->result && !READ_ONCE(poll->canceled)) {
 		if (req->opcode == IORING_OP_POLL_ADD)
 			WRITE_ONCE(poll->active, true);
@@ -5357,35 +5353,34 @@ static void io_poll_task_func(struct io_kiocb *req, bool *locked)
 {
 	struct io_ring_ctx *ctx = req->ctx;
 	struct io_kiocb *nxt;
+	bool done;
 
-	if (io_poll_rewait(req, &req->poll)) {
+	if (io_poll_rewait(req, &req->poll))
+		return;
+
+	spin_lock(&ctx->completion_lock);
+	if (req->poll.done) {
 		spin_unlock(&ctx->completion_lock);
+		return;
+	}
+	done = __io_poll_complete(req, req->result);
+	if (done) {
+		io_poll_remove_double(req);
+		__io_poll_remove_one(req, io_poll_get_single(req), true);
+		hash_del(&req->hash_node);
+		req->poll.done = true;
 	} else {
-		bool done;
+		req->result = 0;
+		WRITE_ONCE(req->poll.active, true);
+	}
+	io_commit_cqring(ctx);
+	spin_unlock(&ctx->completion_lock);
+	io_cqring_ev_posted(ctx);
 
-		if (req->poll.done) {
-			spin_unlock(&ctx->completion_lock);
-			return;
-		}
-		done = __io_poll_complete(req, req->result);
-		if (done) {
-			io_poll_remove_double(req);
-			__io_poll_remove_one(req, io_poll_get_single(req), true);
-			hash_del(&req->hash_node);
-			req->poll.done = true;
-		} else {
-			req->result = 0;
-			WRITE_ONCE(req->poll.active, true);
-		}
-		io_commit_cqring(ctx);
-		spin_unlock(&ctx->completion_lock);
-		io_cqring_ev_posted(ctx);
-
-		if (done) {
-			nxt = io_put_req_find_next(req);
-			if (nxt)
-				io_req_task_submit(nxt, locked);
-		}
+	if (done) {
+		nxt = io_put_req_find_next(req);
+		if (nxt)
+			io_req_task_submit(nxt, locked);
 	}
 }
 
@@ -5507,11 +5502,10 @@ static void io_async_task_func(struct io_kiocb *req, bool *locked)
 
 	trace_io_uring_task_run(req->ctx, req, req->opcode, req->user_data);
 
-	if (io_poll_rewait(req, &apoll->poll)) {
-		spin_unlock(&ctx->completion_lock);
+	if (io_poll_rewait(req, &apoll->poll))
 		return;
-	}
 
+	spin_lock(&ctx->completion_lock);
 	hash_del(&req->hash_node);
 	io_poll_remove_double(req);
 	apoll->poll.done = true;
