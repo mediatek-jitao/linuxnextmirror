@@ -316,40 +316,37 @@ void blk_mq_wake_waiters(struct request_queue *q)
 }
 
 static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
-		unsigned int tag, u64 alloc_time_ns)
+		struct blk_mq_tags *tags, unsigned int tag, u64 alloc_time_ns)
 {
 	struct blk_mq_ctx *ctx = data->ctx;
 	struct blk_mq_hw_ctx *hctx = data->hctx;
 	struct request_queue *q = data->q;
-	struct elevator_queue *e = q->elevator;
-	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);
 	struct request *rq = tags->static_rqs[tag];
-	unsigned int rq_flags = 0;
 
-	if (e) {
-		rq_flags = RQF_ELV;
-		rq->tag = BLK_MQ_NO_TAG;
-		rq->internal_tag = tag;
-	} else {
-		rq->tag = tag;
-		rq->internal_tag = BLK_MQ_NO_TAG;
-	}
+	rq->q = q;
+	rq->mq_ctx = ctx;
+	rq->mq_hctx = hctx;
+	rq->cmd_flags = data->cmd_flags;
 
 	if (data->flags & BLK_MQ_REQ_PM)
-		rq_flags |= RQF_PM;
+		data->rq_flags |= RQF_PM;
 	if (blk_queue_io_stat(q))
-		rq_flags |= RQF_IO_STAT;
-	rq->rq_flags = rq_flags;
+		data->rq_flags |= RQF_IO_STAT;
+	rq->rq_flags = data->rq_flags;
+
+	if (!(data->rq_flags & RQF_ELV)) {
+		rq->tag = tag;
+		rq->internal_tag = BLK_MQ_NO_TAG;
+	} else {
+		rq->tag = BLK_MQ_NO_TAG;
+		rq->internal_tag = tag;
+	}
+	rq->timeout = 0;
 
 	if (blk_mq_need_time_stamp(rq))
 		rq->start_time_ns = ktime_get_ns();
 	else
 		rq->start_time_ns = 0;
-	/* csd/requeue_work/fifo_time is initialized before use */
-	rq->q = q;
-	rq->mq_ctx = ctx;
-	rq->mq_hctx = hctx;
-	rq->cmd_flags = data->cmd_flags;
 	rq->rq_disk = NULL;
 	rq->part = NULL;
 #ifdef CONFIG_BLK_RQ_ALLOC_TIME
@@ -361,7 +358,6 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 #if defined(CONFIG_BLK_DEV_INTEGRITY)
 	rq->nr_integrity_segments = 0;
 #endif
-	rq->timeout = 0;
 	rq->end_io = NULL;
 	rq->end_io_data = NULL;
 
@@ -396,20 +392,23 @@ __blk_mq_alloc_requests_batch(struct blk_mq_alloc_data *data,
 		u64 alloc_time_ns)
 {
 	unsigned int tag, tag_offset;
+	struct blk_mq_tags *tags;
 	struct request *rq;
-	unsigned long tags;
+	unsigned long tag_mask;
 	int i, nr = 0;
 
-	tags = blk_mq_get_tags(data, data->nr_tags, &tag_offset);
-	if (unlikely(!tags))
+	tag_mask = blk_mq_get_tags(data, data->nr_tags, &tag_offset);
+	if (unlikely(!tag_mask))
 		return NULL;
 
-	for (i = 0; tags; i++) {
-		if (!(tags & (1UL << i)))
+	tags = blk_mq_tags_from_data(data);
+	for (i = 0; tag_mask; i++) {
+		if (!(tag_mask & (1UL << i)))
 			continue;
+		prefetch(tags->static_rqs[tag]);
 		tag = tag_offset + i;
-		tags &= ~(1UL << i);
-		rq = blk_mq_rq_ctx_init(data, tag, alloc_time_ns);
+		tag_mask &= ~(1UL << i);
+		rq = blk_mq_rq_ctx_init(data, tags, tag, alloc_time_ns);
 		rq_list_add(data->cached_rq, rq);
 	}
 	data->nr_tags -= nr;
@@ -480,7 +479,8 @@ retry:
 		goto retry;
 	}
 
-	return blk_mq_rq_ctx_init(data, tag, alloc_time_ns);
+	return blk_mq_rq_ctx_init(data, blk_mq_tags_from_data(data), tag,
+					alloc_time_ns);
 }
 
 struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
@@ -490,6 +490,7 @@ struct request *blk_mq_alloc_request(struct request_queue *q, unsigned int op,
 		.q		= q,
 		.flags		= flags,
 		.cmd_flags	= op,
+		.rq_flags	= q->elevator ? RQF_ELV : 0,
 		.nr_tags	= 1,
 	};
 	struct request *rq;
@@ -519,6 +520,7 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 		.q		= q,
 		.flags		= flags,
 		.cmd_flags	= op,
+		.rq_flags	= q->elevator ? RQF_ELV : 0,
 		.nr_tags	= 1,
 	};
 	u64 alloc_time_ns = 0;
@@ -564,7 +566,8 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	tag = blk_mq_get_tag(&data);
 	if (tag == BLK_MQ_NO_TAG)
 		goto out_queue_exit;
-	return blk_mq_rq_ctx_init(&data, tag, alloc_time_ns);
+	return blk_mq_rq_ctx_init(&data, blk_mq_tags_from_data(&data), tag,
+					alloc_time_ns);
 
 out_queue_exit:
 	blk_queue_exit(q);
@@ -2512,6 +2515,7 @@ void blk_mq_submit_bio(struct bio *bio)
 			.q		= q,
 			.nr_tags	= 1,
 			.cmd_flags	= bio->bi_opf,
+			.rq_flags	= q->elevator ? RQF_ELV : 0,
 		};
 
 		if (plug) {
