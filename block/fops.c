@@ -124,9 +124,8 @@ out:
 }
 
 enum {
-	DIO_MULTI_BIO		= 1,
-	DIO_SHOULD_DIRTY	= 2,
-	DIO_IS_SYNC		= 4,
+	DIO_SHOULD_DIRTY	= 1,
+	DIO_IS_SYNC		= 2,
 };
 
 struct blkdev_dio {
@@ -150,7 +149,7 @@ static void blkdev_bio_end_io(struct bio *bio)
 	if (bio->bi_status && !dio->bio.bi_status)
 		dio->bio.bi_status = bio->bi_status;
 
-	if (!(dio->flags & DIO_MULTI_BIO) || atomic_dec_and_test(&dio->ref)) {
+	if (atomic_dec_and_test(&dio->ref)) {
 		if (!(dio->flags & DIO_IS_SYNC)) {
 			struct kiocb *iocb = dio->iocb;
 			ssize_t ret;
@@ -165,8 +164,7 @@ static void blkdev_bio_end_io(struct bio *bio)
 			}
 
 			dio->iocb->ki_complete(iocb, ret);
-			if (dio->flags & DIO_MULTI_BIO)
-				bio_put(&dio->bio);
+			bio_put(&dio->bio);
 		} else {
 			struct task_struct *waiter = dio->waiter;
 
@@ -190,7 +188,6 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	struct blk_plug plug;
 	struct blkdev_dio *dio;
 	struct bio *bio;
-	bool do_poll = (iocb->ki_flags & IOCB_HIPRI);
 	bool is_read = (iov_iter_rw(iter) == READ), is_sync;
 	loff_t pos = iocb->ki_pos;
 	int ret = 0;
@@ -202,11 +199,17 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	bio = bio_alloc_kiocb(iocb, nr_pages, &blkdev_dio_pool);
 
 	dio = container_of(bio, struct blkdev_dio, bio);
+	atomic_set(&dio->ref, 1);
+	/*
+	 * Grab an extra reference to ensure the dio structure which is embedded
+	 * into the first bio stays around.
+	 */
+	bio_get(bio);
+
 	is_sync = is_sync_kiocb(iocb);
 	if (is_sync) {
 		dio->flags = DIO_IS_SYNC;
 		dio->waiter = current;
-		bio_get(bio);
 	} else {
 		dio->flags = 0;
 		dio->iocb = iocb;
@@ -216,12 +219,7 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	if (is_read && iter_is_iovec(iter))
 		dio->flags |= DIO_SHOULD_DIRTY;
 
-	/*
-	 * Don't plug for HIPRI/polled IO, as those should go straight
-	 * to issue
-	 */
-	if (!(iocb->ki_flags & IOCB_HIPRI))
-		blk_start_plug(&plug);
+	blk_start_plug(&plug);
 
 	for (;;) {
 		bio_set_dev(bio, bdev);
@@ -254,34 +252,15 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 
 		nr_pages = bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS);
 		if (!nr_pages) {
-			if (do_poll)
-				bio_set_polled(bio, iocb);
 			submit_bio(bio);
-			if (do_poll)
-				WRITE_ONCE(iocb->private, bio);
 			break;
 		}
-		if (!(dio->flags & DIO_MULTI_BIO)) {
-			/*
-			 * AIO needs an extra reference to ensure the dio
-			 * structure which is embedded into the first bio
-			 * stays around.
-			 */
-			if (!is_sync)
-				bio_get(bio);
-			dio->flags |= DIO_MULTI_BIO;
-			atomic_set(&dio->ref, 2);
-			do_poll = false;
-		} else {
-			atomic_inc(&dio->ref);
-		}
-
+		atomic_inc(&dio->ref);
 		submit_bio(bio);
 		bio = bio_alloc(GFP_KERNEL, nr_pages);
 	}
 
-	if (!(iocb->ki_flags & IOCB_HIPRI))
-		blk_finish_plug(&plug);
+	blk_finish_plug(&plug);
 
 	if (!is_sync)
 		return -EIOCBQUEUED;
@@ -290,9 +269,7 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		if (!READ_ONCE(dio->waiter))
 			break;
-
-		if (!do_poll || !bio_poll(bio, NULL, 0))
-			blk_io_schedule();
+		blk_io_schedule();
 	}
 	__set_current_state(TASK_RUNNING);
 
@@ -352,11 +329,21 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 	bio->bi_end_io = blkdev_bio_end_io_async;
 	bio->bi_ioprio = iocb->ki_ioprio;
 
-	ret = bio_iov_iter_get_pages(bio, iter);
-	if (unlikely(ret)) {
-		bio->bi_status = BLK_STS_IOERR;
-		bio_endio(bio);
-		return ret;
+	if (iov_iter_is_bvec(iter)) {
+		/*
+		 * Users don't rely on the iterator being in any particular
+		 * state for async I/O returning -EIOCBQUEUED, hence we can
+		 * avoid expensive iov_iter_advance(). Bypass
+		 * bio_iov_iter_get_pages() and set the bvec directly.
+		 */
+		bio_iov_bvec_set(bio, iter);
+	} else {
+		ret = bio_iov_iter_get_pages(bio, iter);
+		if (unlikely(ret)) {
+			bio->bi_status = BLK_STS_IOERR;
+			bio_endio(bio);
+			return ret;
+		}
 	}
 	dio->size = bio->bi_iter.bi_size;
 
@@ -371,14 +358,13 @@ static ssize_t __blkdev_direct_IO_async(struct kiocb *iocb,
 		task_io_account_write(bio->bi_iter.bi_size);
 	}
 
-	if (iocb->ki_flags & IOCB_NOWAIT)
-		bio->bi_opf |= REQ_NOWAIT;
-
 	if (iocb->ki_flags & IOCB_HIPRI) {
-		bio_set_polled(bio, iocb);
+		bio->bi_opf |= REQ_POLLED | REQ_NOWAIT;
 		submit_bio(bio);
 		WRITE_ONCE(iocb->private, bio);
 	} else {
+		if (iocb->ki_flags & IOCB_NOWAIT)
+			bio->bi_opf |= REQ_NOWAIT;
 		submit_bio(bio);
 	}
 	return -EIOCBQUEUED;
