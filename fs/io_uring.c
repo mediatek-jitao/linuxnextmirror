@@ -481,6 +481,7 @@ struct io_poll_iocb {
 	__poll_t			events;
 	bool				done;
 	bool				canceled;
+	bool				active;
 	struct wait_queue_entry		wait;
 };
 
@@ -5228,16 +5229,10 @@ struct io_poll_table {
 	int error;
 };
 
-static int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *poll,
+static inline int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *poll,
 			   __poll_t mask, io_req_tw_func_t func)
 {
-	/* for instances that support it check for an event match first: */
-	if (mask && !(mask & poll->events))
-		return 0;
-
 	trace_io_uring_task_add(req->ctx, req->opcode, req->user_data, mask);
-
-	list_del_init(&poll->wait.entry);
 
 	req->result = mask;
 	req->io_task_work.func = func;
@@ -5253,10 +5248,7 @@ static int __io_async_wake(struct io_kiocb *req, struct io_poll_iocb *poll,
 }
 
 static bool io_poll_rewait(struct io_kiocb *req, struct io_poll_iocb *poll)
-	__acquires(&req->ctx->completion_lock)
 {
-	struct io_ring_ctx *ctx = req->ctx;
-
 	/* req->task == current here, checking PF_EXITING is safe */
 	if (unlikely(req->task->flags & PF_EXITING))
 		WRITE_ONCE(poll->canceled, true);
@@ -5267,9 +5259,11 @@ static bool io_poll_rewait(struct io_kiocb *req, struct io_poll_iocb *poll)
 		req->result = vfs_poll(req->file, &pt) & poll->events;
 	}
 
-	spin_lock(&ctx->completion_lock);
 	if (!req->result && !READ_ONCE(poll->canceled)) {
-		add_wait_queue(poll->head, &poll->wait);
+		if (req->opcode == IORING_OP_POLL_ADD)
+			WRITE_ONCE(poll->active, true);
+		else
+			add_wait_queue(poll->head, &poll->wait);
 		return true;
 	}
 
@@ -5335,38 +5329,58 @@ static bool __io_poll_complete(struct io_kiocb *req, __poll_t mask)
 	return !(flags & IORING_CQE_F_MORE);
 }
 
+static bool __io_poll_remove_one(struct io_kiocb *req,
+				 struct io_poll_iocb *poll, bool do_cancel)
+	__must_hold(&req->ctx->completion_lock)
+{
+	bool do_complete = false;
+
+	if (!poll->head)
+		return false;
+	spin_lock_irq(&poll->head->lock);
+	if (do_cancel)
+		WRITE_ONCE(poll->canceled, true);
+	if (!list_empty(&poll->wait.entry)) {
+		list_del_init(&poll->wait.entry);
+		do_complete = true;
+	}
+	spin_unlock_irq(&poll->head->lock);
+	hash_del(&req->hash_node);
+	return do_complete;
+}
+
 static void io_poll_task_func(struct io_kiocb *req, bool *locked)
 {
 	struct io_ring_ctx *ctx = req->ctx;
 	struct io_kiocb *nxt;
+	bool done;
 
-	if (io_poll_rewait(req, &req->poll)) {
+	if (io_poll_rewait(req, &req->poll))
+		return;
+
+	spin_lock(&ctx->completion_lock);
+	if (req->poll.done) {
 		spin_unlock(&ctx->completion_lock);
+		return;
+	}
+	done = __io_poll_complete(req, req->result);
+	if (done) {
+		io_poll_remove_double(req);
+		__io_poll_remove_one(req, io_poll_get_single(req), true);
+		hash_del(&req->hash_node);
+		req->poll.done = true;
 	} else {
-		bool done;
+		req->result = 0;
+		WRITE_ONCE(req->poll.active, true);
+	}
+	io_commit_cqring(ctx);
+	spin_unlock(&ctx->completion_lock);
+	io_cqring_ev_posted(ctx);
 
-		if (req->poll.done) {
-			spin_unlock(&ctx->completion_lock);
-			return;
-		}
-		done = __io_poll_complete(req, req->result);
-		if (done) {
-			io_poll_remove_double(req);
-			hash_del(&req->hash_node);
-			req->poll.done = true;
-		} else {
-			req->result = 0;
-			add_wait_queue(req->poll.head, &req->poll.wait);
-		}
-		io_commit_cqring(ctx);
-		spin_unlock(&ctx->completion_lock);
-		io_cqring_ev_posted(ctx);
-
-		if (done) {
-			nxt = io_put_req_find_next(req);
-			if (nxt)
-				io_req_task_submit(nxt, locked);
-		}
+	if (done) {
+		nxt = io_put_req_find_next(req);
+		if (nxt)
+			io_req_task_submit(nxt, locked);
 	}
 }
 
@@ -5411,6 +5425,7 @@ static void io_init_poll_iocb(struct io_poll_iocb *poll, __poll_t events,
 	poll->head = NULL;
 	poll->done = false;
 	poll->canceled = false;
+	poll->active = true;
 #define IO_POLL_UNMASK	(EPOLLERR|EPOLLHUP|EPOLLNVAL|EPOLLRDHUP)
 	/* mask in events that we always want/need */
 	poll->events = events | IO_POLL_UNMASK;
@@ -5487,11 +5502,10 @@ static void io_async_task_func(struct io_kiocb *req, bool *locked)
 
 	trace_io_uring_task_run(req->ctx, req, req->opcode, req->user_data);
 
-	if (io_poll_rewait(req, &apoll->poll)) {
-		spin_unlock(&ctx->completion_lock);
+	if (io_poll_rewait(req, &apoll->poll))
 		return;
-	}
 
+	spin_lock(&ctx->completion_lock);
 	hash_del(&req->hash_node);
 	io_poll_remove_double(req);
 	apoll->poll.done = true;
@@ -5508,11 +5522,17 @@ static int io_async_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 {
 	struct io_kiocb *req = wait->private;
 	struct io_poll_iocb *poll = &req->apoll->poll;
+	__poll_t mask = key_to_poll(key);
 
 	trace_io_uring_poll_wake(req->ctx, req->opcode, req->user_data,
 					key_to_poll(key));
 
-	return __io_async_wake(req, poll, key_to_poll(key), io_async_task_func);
+	/* for instances that support it check for an event match first: */
+	if (mask && !(mask & poll->events))
+		return 0;
+
+	list_del_init(&poll->wait.entry);
+	return __io_async_wake(req, poll, mask, io_async_task_func);
 }
 
 static void io_poll_req_insert(struct io_kiocb *req)
@@ -5618,26 +5638,6 @@ static int io_arm_poll_handler(struct io_kiocb *req)
 	trace_io_uring_poll_arm(ctx, req, req->opcode, req->user_data,
 				mask, apoll->poll.events);
 	return IO_APOLL_OK;
-}
-
-static bool __io_poll_remove_one(struct io_kiocb *req,
-				 struct io_poll_iocb *poll, bool do_cancel)
-	__must_hold(&req->ctx->completion_lock)
-{
-	bool do_complete = false;
-
-	if (!poll->head)
-		return false;
-	spin_lock_irq(&poll->head->lock);
-	if (do_cancel)
-		WRITE_ONCE(poll->canceled, true);
-	if (!list_empty(&poll->wait.entry)) {
-		list_del_init(&poll->wait.entry);
-		do_complete = true;
-	}
-	spin_unlock_irq(&poll->head->lock);
-	hash_del(&req->hash_node);
-	return do_complete;
 }
 
 static bool io_poll_remove_one(struct io_kiocb *req)
@@ -5770,8 +5770,17 @@ static int io_poll_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 {
 	struct io_kiocb *req = wait->private;
 	struct io_poll_iocb *poll = &req->poll;
+	__poll_t mask = key_to_poll(key);
 
-	return __io_async_wake(req, poll, key_to_poll(key), io_poll_task_func);
+	/* for instances that support it check for an event match first: */
+	if (mask && !(mask & poll->events))
+		return 0;
+
+	if (!READ_ONCE(poll->active))
+		return 0;
+	WRITE_ONCE(poll->active, false);
+
+	return __io_async_wake(req, poll, mask, io_poll_task_func);
 }
 
 static void io_poll_queue_proc(struct file *file, struct wait_queue_head *head,
