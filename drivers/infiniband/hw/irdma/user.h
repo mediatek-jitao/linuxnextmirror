@@ -283,9 +283,7 @@ enum irdma_status_code irdma_uk_inline_rdma_write(struct irdma_qp_uk *qp,
 enum irdma_status_code irdma_uk_inline_send(struct irdma_qp_uk *qp,
 					    struct irdma_post_sq_info *info,
 					    bool post_sq);
-enum irdma_status_code irdma_uk_mw_bind(struct irdma_qp_uk *qp,
-					struct irdma_post_sq_info *info,
-					bool post_sq);
+
 enum irdma_status_code irdma_uk_post_nop(struct irdma_qp_uk *qp, u64 wr_id,
 					 bool signaled, bool post_sq);
 enum irdma_status_code irdma_uk_post_receive(struct irdma_qp_uk *qp,
@@ -318,8 +316,8 @@ void irdma_uk_cq_request_notification(struct irdma_cq_uk *cq,
 				      enum irdma_cmpl_notify cq_notify);
 void irdma_uk_cq_resize(struct irdma_cq_uk *cq, void *cq_base, int size);
 void irdma_uk_cq_set_resized_cnt(struct irdma_cq_uk *qp, u16 cnt);
-enum irdma_status_code irdma_uk_cq_init(struct irdma_cq_uk *cq,
-					struct irdma_cq_uk_init_info *info);
+void irdma_uk_cq_init(struct irdma_cq_uk *cq,
+		      struct irdma_cq_uk_init_info *info);
 enum irdma_status_code irdma_uk_qp_init(struct irdma_qp_uk *qp,
 					struct irdma_qp_uk_init_info *info);
 struct irdma_sq_uk_wr_trk_info {
@@ -369,7 +367,6 @@ struct irdma_qp_uk {
 	bool rq_flush_complete:1; /* Indicates flush was seen and RQ was empty after the flush */
 	bool destroy_pending:1; /* Indicates the QP is being destroyed */
 	void *back_qp;
-	spinlock_t *lock;
 	u8 dbg_rq_flushed;
 	u8 sq_flush_seen;
 	u8 rq_flush_seen;
