@@ -561,3 +561,5 @@ menu "Power management options"
 source "kernel/power/Kconfig"
 
 endmenu
+
+source "arch/riscv/kvm/Kconfig"
