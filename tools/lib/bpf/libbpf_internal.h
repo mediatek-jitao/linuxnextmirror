@@ -52,8 +52,8 @@
 #endif
 
 /* Older libelf all end up in this expression, for both 32 and 64 bit */
-#ifndef GELF_ST_VISIBILITY
-#define GELF_ST_VISIBILITY(o) ((o) & 0x03)
+#ifndef ELF64_ST_VISIBILITY
+#define ELF64_ST_VISIBILITY(o) ((o) & 0x03)
 #endif
 
 #define BTF_INFO_ENC(kind, kind_flag, vlen) \
@@ -69,8 +69,8 @@
 #define BTF_VAR_SECINFO_ENC(type, offset, size) (type), (offset), (size)
 #define BTF_TYPE_FLOAT_ENC(name, sz) \
 	BTF_TYPE_ENC(name, BTF_INFO_ENC(BTF_KIND_FLOAT, 0, 0), sz)
-#define BTF_TYPE_TAG_ENC(value, type, component_idx) \
-	BTF_TYPE_ENC(value, BTF_INFO_ENC(BTF_KIND_TAG, 0, 0), type), (component_idx)
+#define BTF_TYPE_DECL_TAG_ENC(value, type, component_idx) \
+	BTF_TYPE_ENC(value, BTF_INFO_ENC(BTF_KIND_DECL_TAG, 0, 0), type), (component_idx)
 
 #ifndef likely
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -193,8 +193,9 @@ enum map_def_parts {
 	MAP_DEF_NUMA_NODE	= 0x080,
 	MAP_DEF_PINNING		= 0x100,
 	MAP_DEF_INNER_MAP	= 0x200,
+	MAP_DEF_MAP_EXTRA	= 0x400,
 
-	MAP_DEF_ALL		= 0x3ff, /* combination of all above */
+	MAP_DEF_ALL		= 0x7ff, /* combination of all above */
 };
 
 struct btf_map_def {
@@ -208,6 +209,7 @@ struct btf_map_def {
 	__u32 map_flags;
 	__u32 numa_node;
 	__u32 pinning;
+	__u64 map_extra;
 };
 
 int parse_btf_map_def(const char *map_name, struct btf *btf,
@@ -298,14 +300,32 @@ struct bpf_prog_load_params {
 	__u32 log_level;
 	char *log_buf;
 	size_t log_buf_sz;
+	int *fd_array;
 };
 
 int libbpf__bpf_prog_load(const struct bpf_prog_load_params *load_attr);
 
-int bpf_object__section_size(const struct bpf_object *obj, const char *name,
-			     __u32 *size);
-int bpf_object__variable_offset(const struct bpf_object *obj, const char *name,
-				__u32 *off);
+struct bpf_create_map_params {
+	const char *name;
+	enum bpf_map_type map_type;
+	__u32 map_flags;
+	__u32 key_size;
+	__u32 value_size;
+	__u32 max_entries;
+	__u32 numa_node;
+	__u32 btf_fd;
+	__u32 btf_key_type_id;
+	__u32 btf_value_type_id;
+	__u32 map_ifindex;
+	union {
+		__u32 inner_map_fd;
+		__u32 btf_vmlinux_value_type_id;
+	};
+	__u64 map_extra;
+};
+
+int libbpf__bpf_create_map_xattr(const struct bpf_create_map_params *create_attr);
+
 struct btf *btf_get_from_fd(int btf_fd, struct btf *base_btf);
 void btf_get_kernel_prefix_kind(enum bpf_attach_type attach_type,
 				const char **prefix, int *kind);
@@ -408,6 +428,8 @@ int btf_type_visit_type_ids(struct btf_type *t, type_id_visit_fn visit, void *ct
 int btf_type_visit_str_offs(struct btf_type *t, str_off_visit_fn visit, void *ctx);
 int btf_ext_visit_type_ids(struct btf_ext *btf_ext, type_id_visit_fn visit, void *ctx);
 int btf_ext_visit_str_offs(struct btf_ext *btf_ext, str_off_visit_fn visit, void *ctx);
+__s32 btf__find_by_name_kind_own(const struct btf *btf, const char *type_name,
+				 __u32 kind);
 
 extern enum libbpf_strict_mode libbpf_mode;
 
