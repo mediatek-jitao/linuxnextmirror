@@ -62,6 +62,7 @@ struct nsim_ethtool_pauseparam {
 struct nsim_ethtool {
 	u32 get_err;
 	u32 set_err;
+	u32 channels;
 	struct nsim_ethtool_pauseparam pauseparam;
 	struct ethtool_coalesce coalesce;
 	struct ethtool_ringparam ring;
@@ -223,7 +224,6 @@ struct nsim_dev {
 	struct dentry *ddir;
 	struct dentry *ports_ddir;
 	struct dentry *take_snapshot;
-	struct dentry *max_vfs;
 	struct dentry *nodes_ddir;
 	struct bpf_offload_dev *bpf_dev;
 	bool bpf_bind_accept;
