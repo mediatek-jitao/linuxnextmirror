@@ -2489,6 +2489,13 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
 	};
 	struct request *rq;
 
+	if (unlikely(bio_queue_enter(bio)))
+		return NULL;
+	if (unlikely(!submit_bio_checks(bio)))
+		goto put_exit;
+
+	rq_qos_throttle(q, bio);
+
 	if (plug) {
 		data.nr_tags = plug->nr_ios;
 		plug->nr_ios = 1;
@@ -2502,6 +2509,8 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
 	rq_qos_cleanup(q, bio);
 	if (bio->bi_opf & REQ_NOWAIT)
 		bio_wouldblock_error(bio);
+put_exit:
+	blk_queue_exit(q);
 	return NULL;
 }
 
@@ -2514,8 +2523,11 @@ static inline struct request *blk_mq_get_request(struct request_queue *q,
 
 		rq = rq_list_peek(&plug->cached_rq);
 		if (rq) {
+			if (unlikely(!submit_bio_checks(bio)))
+				return NULL;
 			plug->cached_rq = rq_list_next(rq);
 			INIT_LIST_HEAD(&rq->queuelist);
+			rq_qos_throttle(q, bio);
 			return rq;
 		}
 	}
@@ -2546,26 +2558,27 @@ void blk_mq_submit_bio(struct bio *bio)
 	unsigned int nr_segs = 1;
 	blk_status_t ret;
 
+	if (unlikely(!blk_crypto_bio_prep(&bio)))
+		return;
+
 	blk_queue_bounce(q, &bio);
 	if (blk_may_split(q, bio))
 		__blk_queue_split(q, &bio, &nr_segs);
 
 	if (!bio_integrity_prep(bio))
-		goto queue_exit;
+		return;
 
 	if (!blk_queue_nomerges(q) && bio_mergeable(bio)) {
 		if (blk_attempt_plug_merge(q, bio, nr_segs, &same_queue_rq))
-			goto queue_exit;
+			return;
 		if (blk_mq_sched_bio_merge(q, bio, nr_segs))
-			goto queue_exit;
+			return;
 	}
-
-	rq_qos_throttle(q, bio);
 
 	plug = blk_mq_plug(q, bio);
 	rq = blk_mq_get_request(q, plug, bio);
 	if (unlikely(!rq))
-		goto queue_exit;
+		return;
 
 	trace_block_getrq(bio);
 
@@ -2646,10 +2659,6 @@ void blk_mq_submit_bio(struct bio *bio)
 		/* Default case. */
 		blk_mq_sched_insert_request(rq, false, true, true);
 	}
-
-	return;
-queue_exit:
-	blk_queue_exit(q);
 }
 
 static size_t order_to_size(unsigned int order)
