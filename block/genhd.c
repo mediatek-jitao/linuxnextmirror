@@ -472,15 +472,11 @@ int device_add_disk(struct device *parent, struct gendisk *disk,
 
 	disk->part0->bd_holder_dir =
 		kobject_create_and_add("holders", &ddev->kobj);
-	if (!disk->part0->bd_holder_dir) {
-		ret = -ENOMEM;
+	if (!disk->part0->bd_holder_dir)
 		goto out_del_integrity;
-	}
 	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj);
-	if (!disk->slave_dir) {
-		ret = -ENOMEM;
+	if (!disk->slave_dir)
 		goto out_put_holder_dir;
-	}
 
 	ret = bd_register_pending_holders(disk);
 	if (ret < 0)
