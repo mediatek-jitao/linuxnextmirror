@@ -217,6 +217,7 @@ static const struct drm_format_info *
 amd_get_format_info(const struct drm_mode_fb_cmd2 *cmd);
 
 static void handle_hpd_irq_helper(struct amdgpu_dm_connector *aconnector);
+static void handle_hpd_rx_irq(void *param);
 
 static bool
 is_timing_unchanged_for_freesync(struct drm_crtc_state *old_crtc_state,
@@ -619,7 +620,7 @@ static void dm_dcn_vertical_interrupt0_high_irq(void *interrupt_params)
 
 	amdgpu_dm_crtc_handle_crc_window_irq(&acrtc->base);
 }
-#endif
+#endif /* CONFIG_DRM_AMD_SECURE_DISPLAY */
 
 /**
  * dmub_aux_setconfig_reply_callback - Callback for AUX or SET_CONFIG command.
@@ -669,10 +670,7 @@ void dmub_hpd_callback(struct amdgpu_device *adev, struct dmub_notification *not
 		return;
 	}
 
-	drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
-
 	link_index = notify->link_index;
-
 	link = adev->dm.dc->links[link_index];
 
 	drm_connector_list_iter_begin(dev, &iter);
@@ -685,10 +683,13 @@ void dmub_hpd_callback(struct amdgpu_device *adev, struct dmub_notification *not
 		}
 	}
 	drm_connector_list_iter_end(&iter);
-	drm_modeset_unlock(&dev->mode_config.connection_mutex);
 
-	if (hpd_aconnector)
-		handle_hpd_irq_helper(hpd_aconnector);
+	if (hpd_aconnector) {
+		if (notify->type == DMUB_NOTIFICATION_HPD)
+			handle_hpd_irq_helper(hpd_aconnector);
+		else if (notify->type == DMUB_NOTIFICATION_HPD_IRQ)
+			handle_hpd_rx_irq(hpd_aconnector);
+	}
 }
 
 /**
@@ -764,6 +765,10 @@ static void dm_dmub_outbox1_low_irq(void *interrupt_params)
 				DRM_ERROR("DM: notify type %d invalid!", notify.type);
 				continue;
 			}
+			if (!dm->dmub_callback[notify.type]) {
+				DRM_DEBUG_DRIVER("DMUB notification skipped, no handler: type=%d\n", notify.type);
+				continue;
+			}
 			if (dm->dmub_thread_offload[notify.type] == true) {
 				dmub_hpd_wrk = kzalloc(sizeof(*dmub_hpd_wrk), GFP_ATOMIC);
 				if (!dmub_hpd_wrk) {
@@ -784,8 +789,7 @@ static void dm_dmub_outbox1_low_irq(void *interrupt_params)
 					plink = adev->dm.dc->links[notify.link_index];
 					if (plink) {
 						plink->hpd_status =
-							notify.hpd_status ==
-							DP_HPD_PLUG ? true : false;
+							notify.hpd_status == DP_HPD_PLUG;
 					}
 				}
 				queue_work(adev->dm.delayed_hpd_wq, &dmub_hpd_wrk->handle_hpd_work);
@@ -813,7 +817,7 @@ static void dm_dmub_outbox1_low_irq(void *interrupt_params)
 	if (count > DMUB_TRACE_MAX_READ)
 		DRM_DEBUG_DRIVER("Warning : count > DMUB_TRACE_MAX_READ");
 }
-#endif
+#endif /* CONFIG_DRM_AMD_DC_DCN */
 
 static int dm_set_clockgating_state(void *handle,
 		  enum amd_clockgating_state state)
@@ -1564,7 +1568,11 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 			DRM_ERROR("amdgpu: fail to register dmub hpd callback");
 			goto error;
 		}
-#endif
+		if (!register_dmub_notify_callback(adev, DMUB_NOTIFICATION_HPD_IRQ, dmub_hpd_callback, true)) {
+			DRM_ERROR("amdgpu: fail to register dmub hpd callback");
+			goto error;
+		}
+#endif /* CONFIG_DRM_AMD_DC_DCN */
 	}
 
 	if (amdgpu_dm_initialize_drm_device(adev)) {
@@ -6078,7 +6086,7 @@ static void apply_dsc_policy_for_stream(struct amdgpu_dm_connector *aconnector,
 	if (stream->timing.flags.DSC && aconnector->dsc_settings.dsc_bits_per_pixel)
 		stream->timing.dsc_cfg.bits_per_pixel = aconnector->dsc_settings.dsc_bits_per_pixel;
 }
-#endif
+#endif /* CONFIG_DRM_AMD_DC_DCN */
 
 /**
  * DOC: FreeSync Video
@@ -10802,7 +10810,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		ret = drm_atomic_add_affected_connectors(state, crtc);
 		if (ret)
-			return ret;
+			goto fail;
 
 		ret = drm_atomic_add_affected_planes(state, crtc);
 		if (ret)
