@@ -1064,6 +1064,7 @@ retry_under_glock:
 		leftover = fault_in_iov_iter_readable(from, window_size);
 		gfs2_holder_disallow_demote(gh);
 		if (leftover != window_size) {
+			from->count = min(from->count, window_size - leftover);
 			if (!gfs2_holder_queued(gh)) {
 				if (read)
 					goto out_uninit;
