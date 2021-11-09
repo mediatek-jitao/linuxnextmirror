@@ -3107,7 +3107,15 @@ void pci_pm_init(struct pci_dev *dev)
 	u16 pmc;
 
 	pm_runtime_forbid(&dev->dev);
+
+	/*
+	 * Unbound PCI devices are always put in D0.  If the driver supports
+	 * runtime PM, it should call pm_runtime_put_noidle(), or any other
+	 * runtime PM helper function decrementing the usage count, in its
+	 * probe routine and pm_runtime_get_noresume() in its remove routine.
+	 */
 	pm_runtime_set_active(&dev->dev);
+	pm_runtime_get_noresume(&dev->dev);
 	pm_runtime_enable(&dev->dev);
 	device_enable_async_suspend(&dev->dev);
 	dev->wakeup_prepared = false;
