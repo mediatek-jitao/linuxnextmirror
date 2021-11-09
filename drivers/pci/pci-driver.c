@@ -309,16 +309,6 @@ static long local_pci_probe(void *_ddi)
 	struct device *dev = &pci_dev->dev;
 	int rc;
 
-	/*
-	 * Unbound PCI devices are always put in D0, regardless of
-	 * runtime PM status.  During probe, the device is set to
-	 * active and the usage count is incremented.  If the driver
-	 * supports runtime PM, it should call pm_runtime_put_noidle(),
-	 * or any other runtime PM helper function decrementing the usage
-	 * count, in its probe routine and pm_runtime_get_noresume() in
-	 * its remove routine.
-	 */
-	pm_runtime_get_sync(dev);
 	rc = pci_drv->probe(pci_dev, ddi->id);
 	if (!rc)
 		return rc;
@@ -463,9 +453,6 @@ static void pci_device_remove(struct device *dev)
 	}
 	pcibios_free_irq(pci_dev);
 	pci_iov_remove(pci_dev);
-
-	/* Undo the runtime PM settings in local_pci_probe() */
-	pm_runtime_put_sync(dev);
 
 	/*
 	 * If the device is still on, set the power state as "unknown",
