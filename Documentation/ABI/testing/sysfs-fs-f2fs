@@ -369,13 +369,15 @@ Contact:	"Jaegeuk Kim" <jaegeuk@kernel.org>
 Description:	Give a way to attach REQ_META|FUA to data writes
 		given temperature-based bits. Now the bits indicate:
 
-		+-------------------+-------------------+
-		|      REQ_META     |      REQ_FUA      |
-		+------+------+-----+------+------+-----+
-		|    5 |    4 |   3 |    2 |    1 |   0 |
-		+------+------+-----+------+------+-----+
-		| Cold | Warm | Hot | Cold | Warm | Hot |
-		+------+------+-----+------+------+-----+
+		+------------+-------------------+-------------------+
+		| HIPRI_DIO  |      REQ_META     |      REQ_FUA      |
+		+------------+------+------+-----+------+------+-----+
+		|          6 |    5 |    4 |   3 |    2 |    1 |   0 |
+		+------------+------+------+-----+------+------+-----+
+		|        All | Cold | Warm | Hot | Cold | Warm | Hot |
+		+------------+------+------+-----+------+------+-----+
+
+		Note that, HIPRI_DIO bit is only for direct IO path.
 
 What:		/sys/fs/f2fs/<disk>/node_io_flag
 Date:		June 2020
@@ -512,3 +514,19 @@ Date:		July 2021
 Contact:	"Daeho Jeong" <daehojeong@google.com>
 Description:	You can	control the multiplier value of	bdi device readahead window size
 		between 2 (default) and 256 for POSIX_FADV_SEQUENTIAL advise option.
+
+What:		/sys/fs/f2fs/<disk>/max_fragment_chunk
+Date:		August 2021
+Contact:	"Daeho Jeong" <daehojeong@google.com>
+Description:	With "mode=fragment:block" mount options, we can scatter block allocation.
+		f2fs will allocate 1..<max_fragment_chunk> blocks in a chunk and make a hole
+		in the length of 1..<max_fragment_hole> by turns. This value can be set
+		between 1..512 and the default value is 4.
+
+What:		/sys/fs/f2fs/<disk>/max_fragment_hole
+Date:		August 2021
+Contact:	"Daeho Jeong" <daehojeong@google.com>
+Description:	With "mode=fragment:block" mount options, we can scatter block allocation.
+		f2fs will allocate 1..<max_fragment_chunk> blocks in a chunk and make a hole
+		in the length of 1..<max_fragment_hole> by turns. This value can be set
+		between 1..512 and the default value is 4.
